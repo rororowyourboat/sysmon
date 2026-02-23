@@ -35,7 +35,7 @@ ALERT_COOLDOWN = 300  # seconds between repeated alerts for the same metric+seve
 # Processes to nag about if they're running — add/remove as needed.
 # Keys are matched case-insensitively against process names.
 # "idle_minutes" = how long before the first reminder fires.
-WATCHLIST: dict[str, dict] = {
+WATCHLIST: dict[str, dict[str, str | int]] = {
     "zoom":         {"label": "Zoom",           "idle_minutes": 30},
     "postman":      {"label": "Postman",        "idle_minutes": 60},
     "slack":        {"label": "Slack",          "idle_minutes": 120},
@@ -76,7 +76,7 @@ class Alert:
 @dataclass
 class SustainedTracker:
     """Tracks when a metric first exceeded a threshold."""
-    exceeded_since: dict[str, float] = field(default_factory=dict)  # key -> timestamp
+    exceeded_since: dict[str, float] = field(default_factory=lambda: {})
 
     def check(self, key: str, is_exceeded: bool, required_seconds: int) -> bool:
         now = time.monotonic()
@@ -318,7 +318,7 @@ def _get_running_docker_containers() -> list[dict[str, str]]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
-    containers = []
+    containers: list[dict[str, str]] = []
     for line in result.stdout.strip().splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
@@ -393,7 +393,7 @@ def scan_watched_processes() -> list[WatchedProcess]:
             age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
             found.append(WatchedProcess(
                 key=watch_key,
-                label=cfg["label"],
+                label=str(cfg["label"]),
                 age_str=age_str,
                 age_minutes=age_minutes,
             ))
@@ -429,8 +429,8 @@ def check_idle_services(
 
     # ── Watchlisted processes ───────────────────────────────────────────
     for wp in watched:
-        cfg = WATCHLIST.get(wp.key, {})
-        idle_min = cfg.get("idle_minutes", 0)
+        cfg: dict[str, str | int] = WATCHLIST.get(wp.key, {})
+        idle_min: int = int(cfg.get("idle_minutes", 0))
         if idle_min <= 0:
             continue
         if wp.age_minutes >= idle_min:

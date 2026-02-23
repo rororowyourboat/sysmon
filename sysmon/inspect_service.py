@@ -47,7 +47,7 @@ def _fmt_bytes(n: int) -> str:
 def _find_processes(name: str) -> list[psutil.Process]:
     """Find all processes matching a name (case-insensitive substring)."""
     name_lower = name.lower()
-    matched = []
+    matched: list[psutil.Process] = []
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
             pname = (proc.info["name"] or "").lower()
@@ -136,7 +136,7 @@ def inspect_process(name: str) -> None:
             except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                 print(f"    {YELLOW}PID {proc.pid}: {e}{RESET}")
         # Wait briefly and check
-        gone, alive = psutil.wait_procs(procs, timeout=5)
+        _gone, alive = psutil.wait_procs(procs, timeout=5)
         if alive:
             print(f"  {YELLOW}{len(alive)} process(es) still running after 5s{RESET}")
             force = input(f"  Force kill remaining? [y/N]: ").strip().lower()
