@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
@@ -72,92 +73,46 @@ class SustainedTracker:
             return False
 
 
-# ── Metric collection (reads /proc directly, no sleeps) ────────────────────
+# ── Metric collection (via psutil) ─────────────────────────────────────────
 
 _NPROC: int = os.cpu_count() or 1
-_prev_cpu_times: list[int] | None = None
-_hwmon_temp_path: str | None = None
-_hwmon_searched: bool = False
-
-
-def _read_cpu_times() -> list[int]:
-    """Read aggregate CPU jiffies from /proc/stat: [user,nice,system,idle,iowait,...]."""
-    with open("/proc/stat") as f:
-        parts = f.readline().split()
-    return [int(x) for x in parts[1:]]  # skip "cpu" label
-
-
-def _calc_cpu_percent(prev: list[int], curr: list[int]) -> tuple[float, float]:
-    """Compute overall CPU% and iowait% from two /proc/stat samples."""
-    deltas = [c - p for c, p in zip(curr, prev)]
-    total = sum(deltas)
-    if total == 0:
-        return 0.0, 0.0
-    idle = deltas[3]        # idle field
-    iowait = deltas[4] if len(deltas) > 4 else 0  # iowait field
-    cpu_pct = 100.0 * (1.0 - idle / total)
-    iowait_pct = 100.0 * (iowait / total)
-    return cpu_pct, iowait_pct
-
-
-def _find_hwmon_temp() -> str | None:
-    """Find the best hwmon temp file once, cache the path."""
-    hwmon_base = "/sys/class/hwmon"
-    try:
-        entries = os.listdir(hwmon_base)
-    except OSError:
-        return None
-
-    for hwmon in sorted(entries):
-        name_path = os.path.join(hwmon_base, hwmon, "name")
-        try:
-            with open(name_path) as f:
-                name = f.read().strip()
-        except OSError:
-            continue
-        if name in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
-            # Find highest numbered temp input
-            hwmon_dir = os.path.join(hwmon_base, hwmon)
-            temps = sorted(
-                p for p in os.listdir(hwmon_dir) if p.startswith("temp") and p.endswith("_input")
-            )
-            if temps:
-                return os.path.join(hwmon_dir, temps[0])
-    return None
 
 
 def _read_temp() -> float | None:
-    """Read CPU temperature from cached hwmon path."""
-    global _hwmon_temp_path, _hwmon_searched
-    if not _hwmon_searched:
-        _hwmon_temp_path = _find_hwmon_temp()
-        _hwmon_searched = True
-    if _hwmon_temp_path is None:
-        return None
+    """Read CPU temperature via psutil.sensors_temperatures()."""
     try:
-        with open(_hwmon_temp_path) as f:
-            return int(f.read().strip()) / 1000.0
-    except (OSError, ValueError):
+        temps = psutil.sensors_temperatures()
+    except AttributeError:
+        # sensors_temperatures() not available on this platform
         return None
+    if not temps:
+        return None
+
+    # Try common chip names in order of preference
+    for chip in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
+        if chip in temps and temps[chip]:
+            return float(temps[chip][0].current)
+
+    # Fallback: use the first available sensor
+    for entries in temps.values():
+        if entries:
+            return float(entries[0].current)
+
+    return None
 
 
 def collect_metrics() -> dict[str, float | None]:
-    """Gather all system metrics by reading /proc and /sys directly.
+    """Gather all system metrics via psutil.
 
-    CPU percentage is computed as a delta between ticks (no blocking sleep).
-    First call returns 0% CPU — that's expected.
+    Uses psutil.cpu_times_percent() for non-blocking CPU stats (computes
+    delta since last call internally). First call may return 0% — that's
+    expected.
     """
-    global _prev_cpu_times
+    # CPU — psutil tracks the delta internally, no blocking sleep needed
+    cpu_times = psutil.cpu_times_percent(interval=None)
+    cpu_pct = 100.0 - cpu_times.idle
+    iowait_pct = cpu_times.iowait if hasattr(cpu_times, "iowait") else 0.0
 
-    # CPU — delta between previous and current /proc/stat
-    curr_times = _read_cpu_times()
-    if _prev_cpu_times is not None:
-        cpu_pct, iowait_pct = _calc_cpu_percent(_prev_cpu_times, curr_times)
-    else:
-        cpu_pct, iowait_pct = 0.0, 0.0
-    _prev_cpu_times = curr_times
-
-    # Memory — still use psutil, it's fast (single /proc/meminfo read)
     ram = psutil.virtual_memory()
     swap = psutil.swap_memory()
     disk = psutil.disk_usage("/")
@@ -291,10 +246,10 @@ def open_btop() -> None:
 # ── Idle service / Docker detection ─────────────────────────────────────────
 
 def _get_running_docker_containers() -> list[dict[str, str]]:
-    """Return list of running Docker containers with name, image, and uptime."""
+    """Return list of running Docker containers with name, image, status, and created-at timestamp."""
     try:
         result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"],
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -310,32 +265,41 @@ def _get_running_docker_containers() -> list[dict[str, str]]:
                 "name": parts[0],
                 "image": parts[1],
                 "status": parts[2],
-                "running_for": parts[3] if len(parts) > 3 else "",
+                "created_at": parts[3] if len(parts) > 3 else "",
             })
     return containers
 
 
-def _parse_docker_uptime_minutes(running_for: str) -> int:
-    """Rough parse of Docker's 'running for' string into minutes."""
-    s = running_for.lower()
-    # e.g. "About an hour", "2 hours", "3 days", "45 minutes", "30 seconds"
-    minutes = 0
-    if "day" in s:
-        try:
-            minutes += int("".join(c for c in s.split("day")[0] if c.isdigit()) or 1) * 1440
-        except ValueError:
-            minutes += 1440
-    if "hour" in s:
-        try:
-            minutes += int("".join(c for c in s.split("hour")[0].split()[-1] if c.isdigit()) or 1) * 60
-        except ValueError:
-            minutes += 60
-    if "minute" in s:
-        try:
-            minutes += int("".join(c for c in s.split("minute")[0].split()[-1] if c.isdigit()) or 1)
-        except ValueError:
-            minutes += 1
-    return minutes
+def _parse_docker_created_at(created_at: str) -> int:
+    """Parse Docker's CreatedAt timestamp and return uptime in minutes.
+
+    Docker outputs timestamps like "2025-01-15 10:30:00 +0000 UTC".
+    We parse the first 25 characters (date + timezone offset) and compute
+    the delta from now.
+    """
+    if not created_at:
+        return 0
+    try:
+        # Docker format: "2025-01-15 10:30:00 +0000 UTC"
+        # Parse "2025-01-15 10:30:00 +0000" (the "UTC" suffix is redundant)
+        ts_str = created_at[:25].strip()
+        created = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S %z")
+        delta = datetime.now(timezone.utc) - created
+        return max(0, int(delta.total_seconds() / 60))
+    except (ValueError, IndexError):
+        return 0
+
+
+def _format_minutes(minutes: int) -> str:
+    """Format a duration in minutes as a human-readable string."""
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h {minutes % 60}m"
+    days = hours // 24
+    remaining_hours = hours % 24
+    return f"{days}d {remaining_hours}h"
 
 
 @dataclass
@@ -398,16 +362,17 @@ def check_idle_services(
     # ── Docker containers ───────────────────────────────────────────────
     if docker_idle_minutes > 0:
         for c in containers:
-            uptime = _parse_docker_uptime_minutes(c["running_for"])
+            uptime = _parse_docker_created_at(c["created_at"])
             if uptime >= docker_idle_minutes:
                 key = f"docker:{c['name']}"
                 if now - last_alerted.get(key, 0) >= alert_cooldown:
+                    age = _format_minutes(uptime)
                     results.append(ServiceAlert(
                         kind="docker",
                         name=c["name"],
                         label=f"Docker: {c['name']}",
-                        detail=f"Running for {c['running_for']} ({c['image']})",
-                        age_str=c["running_for"],
+                        detail=f"Running for {age} ({c['image']})",
+                        age_str=age,
                     ))
                     last_alerted[key] = now
 
@@ -509,7 +474,8 @@ def print_metrics(
     if containers:
         lines.append(f"  {'Docker':12s}  {len(containers)} container(s)")
         for c in containers:
-            lines.append(f"    - {c['name']:20s}  {c['image']:30s}  up {c['running_for']}")
+            age = _format_minutes(_parse_docker_created_at(c["created_at"]))
+            lines.append(f"    - {c['name']:20s}  {c['image']:30s}  up {age}")
 
     if watched:
         labels = [f"{w.label} ({w.age_str})" for w in watched]

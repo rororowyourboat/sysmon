@@ -2,6 +2,7 @@
 
 import subprocess
 import time
+from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 import psutil
@@ -13,64 +14,17 @@ from sysmon.monitor import (
     ServiceAlert,
     SustainedTracker,
     WatchedProcess,
-    _calc_cpu_percent,
     _detect_terminal,
+    _format_minutes,
     _get_running_docker_containers,
-    _parse_docker_uptime_minutes,
+    _parse_docker_created_at,
+    _read_temp,
     check_idle_services,
     check_thresholds,
     collect_metrics,
     scan_watched_processes,
     send_alert,
 )
-
-
-# ── _calc_cpu_percent ──────────────────────────────────────────────────────
-
-
-class TestCalcCpuPercent:
-    def test_full_load(self) -> None:
-        # All time went to user (index 0), none to idle (index 3)
-        prev = [0, 0, 0, 1000, 0, 0, 0, 0, 0, 0]
-        curr = [1000, 0, 0, 1000, 0, 0, 0, 0, 0, 0]
-        cpu, iowait = _calc_cpu_percent(prev, curr)
-        assert cpu == 100.0
-        assert iowait == 0.0
-
-    def test_all_idle(self) -> None:
-        prev = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        curr = [0, 0, 0, 1000, 0, 0, 0, 0, 0, 0]
-        cpu, iowait = _calc_cpu_percent(prev, curr)
-        assert cpu == 0.0
-        assert iowait == 0.0
-
-    def test_50_percent(self) -> None:
-        prev = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        curr = [500, 0, 0, 500, 0, 0, 0, 0, 0, 0]
-        cpu, iowait = _calc_cpu_percent(prev, curr)
-        assert cpu == pytest.approx(50.0)
-        assert iowait == 0.0
-
-    def test_iowait(self) -> None:
-        prev = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        curr = [0, 0, 0, 500, 500, 0, 0, 0, 0, 0]
-        cpu, iowait = _calc_cpu_percent(prev, curr)
-        assert cpu == pytest.approx(50.0)
-        assert iowait == pytest.approx(50.0)
-
-    def test_zero_delta(self) -> None:
-        prev = [100, 0, 0, 100, 0, 0, 0, 0, 0, 0]
-        curr = [100, 0, 0, 100, 0, 0, 0, 0, 0, 0]
-        cpu, iowait = _calc_cpu_percent(prev, curr)
-        assert cpu == 0.0
-        assert iowait == 0.0
-
-    def test_short_fields_no_iowait(self) -> None:
-        prev = [0, 0, 0, 0]
-        curr = [500, 0, 0, 500]
-        cpu, iowait = _calc_cpu_percent(prev, curr)
-        assert cpu == pytest.approx(50.0)
-        assert iowait == 0.0
 
 
 # ── SustainedTracker ───────────────────────────────────────────────────────
@@ -160,41 +114,108 @@ class TestCheckThresholds:
         assert alerts[0].severity == "warning"
 
 
-# ── _parse_docker_uptime_minutes ──────────────────────────────────────────
+# ── _parse_docker_created_at ──────────────────────────────────────────────
 
 
-class TestParseDockerUptimeMinutes:
+class TestParseDockerCreatedAt:
+    def test_recent_timestamp(self) -> None:
+        two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+        ts = two_hours_ago.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC"
+        result = _parse_docker_created_at(ts)
+        assert 119 <= result <= 121  # ~120 minutes, allow 1 min tolerance
+
+    def test_old_timestamp(self) -> None:
+        three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+        ts = three_days_ago.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC"
+        result = _parse_docker_created_at(ts)
+        expected = 3 * 24 * 60
+        assert expected - 2 <= result <= expected + 2
+
+    def test_empty_string(self) -> None:
+        assert _parse_docker_created_at("") == 0
+
+    def test_invalid_string(self) -> None:
+        assert _parse_docker_created_at("not a timestamp") == 0
+
+    def test_five_minutes_ago(self) -> None:
+        five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+        ts = five_min_ago.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC"
+        result = _parse_docker_created_at(ts)
+        assert 4 <= result <= 6
+
+
+# ── _format_minutes ──────────────────────────────────────────────────────
+
+
+class TestFormatMinutes:
+    def test_under_hour(self) -> None:
+        assert _format_minutes(45) == "45m"
+
+    def test_exact_hour(self) -> None:
+        assert _format_minutes(60) == "1h 0m"
+
+    def test_hours_and_minutes(self) -> None:
+        assert _format_minutes(150) == "2h 30m"
+
     def test_days(self) -> None:
-        assert _parse_docker_uptime_minutes("3 days") == 3 * 1440
+        assert _format_minutes(1500) == "1d 1h"
 
-    def test_about_an_hour(self) -> None:
-        assert _parse_docker_uptime_minutes("About an hour") == 60
+    def test_zero(self) -> None:
+        assert _format_minutes(0) == "0m"
 
-    def test_hours(self) -> None:
-        assert _parse_docker_uptime_minutes("2 hours") == 120
 
-    def test_minutes(self) -> None:
-        assert _parse_docker_uptime_minutes("45 minutes") == 45
+# ── _read_temp (via psutil) ──────────────────────────────────────────────
 
-    def test_seconds(self) -> None:
-        # No minute/hour/day component → 0
-        assert _parse_docker_uptime_minutes("30 seconds") == 0
 
-    def test_compound(self) -> None:
-        # Docker sometimes says "3 days, 2 hours"
-        result = _parse_docker_uptime_minutes("3 days, 2 hours")
-        assert result == 3 * 1440 + 120
+class TestReadTemp:
+    @patch("sysmon.monitor.psutil.sensors_temperatures")
+    def test_coretemp(self, mock_temps: MagicMock) -> None:
+        mock_temps.return_value = {
+            "coretemp": [MagicMock(current=65.0)],
+        }
+        assert _read_temp() == 65.0
+
+    @patch("sysmon.monitor.psutil.sensors_temperatures")
+    def test_k10temp(self, mock_temps: MagicMock) -> None:
+        mock_temps.return_value = {
+            "k10temp": [MagicMock(current=72.0)],
+        }
+        assert _read_temp() == 72.0
+
+    @patch("sysmon.monitor.psutil.sensors_temperatures")
+    def test_fallback_to_first_sensor(self, mock_temps: MagicMock) -> None:
+        mock_temps.return_value = {
+            "some_other_chip": [MagicMock(current=55.0)],
+        }
+        assert _read_temp() == 55.0
+
+    @patch("sysmon.monitor.psutil.sensors_temperatures")
+    def test_no_sensors(self, mock_temps: MagicMock) -> None:
+        mock_temps.return_value = {}
+        assert _read_temp() is None
+
+    @patch("sysmon.monitor.psutil.sensors_temperatures", side_effect=AttributeError)
+    def test_not_available(self, mock_temps: MagicMock) -> None:
+        assert _read_temp() is None
 
 
 # ── check_idle_services ──────────────────────────────────────────────────
 
 
 class TestCheckIdleServices:
+    def _make_container(self, name: str, image: str, minutes_ago: int) -> dict[str, str]:
+        """Helper to create a container dict with a created_at timestamp."""
+        ts = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        return {
+            "name": name,
+            "image": image,
+            "status": "Up",
+            "created_at": ts.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC",
+        }
+
     def test_docker_container_over_idle(self) -> None:
         last_alerted: dict[str, float] = {}
-        containers = [
-            {"name": "mydb", "image": "postgres:16", "status": "Up 2 hours", "running_for": "2 hours"},
-        ]
+        containers = [self._make_container("mydb", "postgres:16", 120)]
         alerts = check_idle_services(last_alerted, [], containers)
         assert len(alerts) == 1
         assert alerts[0].kind == "docker"
@@ -202,9 +223,7 @@ class TestCheckIdleServices:
 
     def test_docker_container_under_idle(self) -> None:
         last_alerted: dict[str, float] = {}
-        containers = [
-            {"name": "mydb", "image": "postgres:16", "status": "Up 5 minutes", "running_for": "5 minutes"},
-        ]
+        containers = [self._make_container("mydb", "postgres:16", 5)]
         alerts = check_idle_services(last_alerted, [], containers)
         assert alerts == []
 
@@ -225,17 +244,13 @@ class TestCheckIdleServices:
 
     def test_cooldown_suppresses_repeat(self) -> None:
         last_alerted: dict[str, float] = {"docker:mydb": time.time()}
-        containers = [
-            {"name": "mydb", "image": "postgres:16", "status": "Up 2 hours", "running_for": "2 hours"},
-        ]
+        containers = [self._make_container("mydb", "postgres:16", 120)]
         alerts = check_idle_services(last_alerted, [], containers)
         assert alerts == []
 
     def test_cooldown_expired_allows_alert(self) -> None:
         last_alerted: dict[str, float] = {"docker:mydb": time.time() - alert_cooldown - 1}
-        containers = [
-            {"name": "mydb", "image": "postgres:16", "status": "Up 2 hours", "running_for": "2 hours"},
-        ]
+        containers = [self._make_container("mydb", "postgres:16", 120)]
         alerts = check_idle_services(last_alerted, [], containers)
         assert len(alerts) == 1
 
@@ -249,7 +264,7 @@ class TestCollectMetrics:
     @patch("sysmon.monitor.psutil.disk_usage")
     @patch("sysmon.monitor.psutil.swap_memory")
     @patch("sysmon.monitor.psutil.virtual_memory")
-    @patch("sysmon.monitor._read_cpu_times")
+    @patch("sysmon.monitor.psutil.cpu_times_percent")
     def test_returns_all_keys(
         self,
         mock_cpu: MagicMock,
@@ -259,11 +274,7 @@ class TestCollectMetrics:
         mock_load: MagicMock,
         mock_temp: MagicMock,
     ) -> None:
-        import sysmon.monitor as mod
-
-        # prev: 500 user, 500 idle => curr adds 500 more user, 500 more idle
-        mod._prev_cpu_times = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        mock_cpu.return_value = [500, 0, 0, 500, 0, 0, 0, 0, 0, 0]
+        mock_cpu.return_value = MagicMock(idle=50.0, iowait=5.0)
 
         mock_ram.return_value = MagicMock(percent=45.0)
         mock_swap.return_value = MagicMock(percent=10.0)
@@ -277,6 +288,7 @@ class TestCollectMetrics:
         }
         assert set(result.keys()) == expected_keys
         assert result["cpu_percent"] == pytest.approx(50.0)
+        assert result["iowait"] == pytest.approx(5.0)
         assert result["ram_percent"] == 45.0
         assert result["cpu_temp"] == 55.0
 
@@ -330,12 +342,14 @@ class TestGetRunningDockerContainers:
     def test_parses_output(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="mydb\tpostgres:16\tUp 2 hours\t2 hours\nredis\tredis:7\tUp 30 minutes\t30 minutes\n",
+            stdout="mydb\tpostgres:16\tUp 2 hours\t2025-01-15 10:30:00 +0000 UTC\n"
+                   "redis\tredis:7\tUp 30 minutes\t2025-01-15 12:00:00 +0000 UTC\n",
         )
         result = _get_running_docker_containers()
         assert len(result) == 2
         assert result[0]["name"] == "mydb"
         assert result[0]["image"] == "postgres:16"
+        assert "2025-01-15" in result[0]["created_at"]
 
     @patch("sysmon.monitor.subprocess.run")
     def test_docker_not_installed(self, mock_run: MagicMock) -> None:
