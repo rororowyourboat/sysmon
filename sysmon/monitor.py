@@ -1,5 +1,7 @@
 """Lightweight system health monitor with desktop notifications."""
 
+from __future__ import annotations
+
 import argparse
 import os
 import shutil
@@ -7,49 +9,31 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import psutil
 
+from sysmon.config import DEFAULT_CONFIG, dump_default_config, load_config
 
-# ── Thresholds ──────────────────────────────────────────────────────────────
 
-THRESHOLDS: dict[str, dict[str, float]] = {
-    "cpu_percent":    {"warning": 80.0, "critical": 95.0},
-    "iowait":         {"warning": 15.0, "critical": 30.0},
-    "ram_percent":     {"warning": 85.0, "critical": 95.0},
-    "swap_percent":    {"warning": 50.0, "critical": 80.0},
-    "disk_percent":    {"warning": 85.0, "critical": 95.0},
-    "cpu_temp":        {"warning": 80.0, "critical": 90.0},
-    "load_per_cpu":    {"warning": 1.0,  "critical": 2.0},  # multiplier of nproc
-}
+# ── Configuration (populated by _apply_config / main) ─────────────────────
 
-# Sustained thresholds: metric must stay above threshold for this many seconds
-SUSTAINED: dict[str, dict[str, int]] = {
-    "cpu_percent": {"warning": 30, "critical": 15},
-}
+thresholds: dict[str, dict[str, float]] = DEFAULT_CONFIG["thresholds"]
+sustained: dict[str, dict[str, int]] = DEFAULT_CONFIG["sustained"]
+alert_cooldown: int = DEFAULT_CONFIG["alert_cooldown"]
+watchlist: dict[str, dict[str, str | int]] = DEFAULT_CONFIG["watchlist"]
+docker_idle_minutes: int = DEFAULT_CONFIG["docker_idle_minutes"]
 
-ALERT_COOLDOWN = 300  # seconds between repeated alerts for the same metric+severity
 
-# ── Idle service detection ──────────────────────────────────────────────────
-
-# Processes to nag about if they're running — add/remove as needed.
-# Keys are matched case-insensitively against process names.
-# "idle_minutes" = how long before the first reminder fires.
-WATCHLIST: dict[str, dict[str, str | int]] = {
-    "zoom":         {"label": "Zoom",           "idle_minutes": 30},
-    "postman":      {"label": "Postman",        "idle_minutes": 60},
-    "slack":        {"label": "Slack",          "idle_minutes": 120},
-    "teams":        {"label": "Teams",          "idle_minutes": 60},
-    "obs":          {"label": "OBS Studio",     "idle_minutes": 30},
-    "discord":      {"label": "Discord",        "idle_minutes": 120},
-    "dbeaver":      {"label": "DBeaver",        "idle_minutes": 60},
-    "code":         {"label": "VS Code",        "idle_minutes": 0},  # 0 = never nag
-    "firefox":      {"label": "Firefox",        "idle_minutes": 0},
-    "chrome":       {"label": "Chrome",         "idle_minutes": 0},
-}
-
-# Docker: remind after this many minutes of a container running
-DOCKER_IDLE_MINUTES = 60
+def _apply_config(cfg: dict[str, Any]) -> None:
+    """Update module globals from a merged config dict."""
+    global thresholds, sustained, alert_cooldown, watchlist, docker_idle_minutes
+    thresholds = cfg["thresholds"]
+    sustained = cfg["sustained"]
+    alert_cooldown = cfg["alert_cooldown"]
+    watchlist = cfg["watchlist"]
+    docker_idle_minutes = cfg["docker_idle_minutes"]
 
 METRIC_LABELS: dict[str, str] = {
     "cpu_percent":  "CPU Usage",
@@ -194,7 +178,7 @@ def collect_metrics() -> dict[str, float | None]:
 
 def check_thresholds(
     metrics: dict[str, float | None],
-    sustained: SustainedTracker,
+    tracker: SustainedTracker,
 ) -> list[Alert]:
     """Compare metrics against thresholds and return any triggered alerts."""
     alerts: list[Alert] = []
@@ -208,7 +192,7 @@ def check_thresholds(
     for metric, value in metrics.items():
         if value is None:
             continue
-        thresh = THRESHOLDS.get(metric)
+        thresh = thresholds.get(metric)
         if not thresh:
             continue
 
@@ -218,10 +202,10 @@ def check_thresholds(
             exceeded = value >= limit
 
             # For sustained metrics, check duration
-            if metric in SUSTAINED:
+            if metric in sustained:
                 key = f"{metric}:{severity}"
-                required = SUSTAINED[metric][severity]
-                if not sustained.check(key, exceeded, required):
+                required = sustained[metric][severity]
+                if not tracker.check(key, exceeded, required):
                     continue
             elif not exceeded:
                 continue
@@ -385,7 +369,7 @@ def scan_watched_processes() -> list[WatchedProcess]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-        for watch_key, cfg in WATCHLIST.items():
+        for watch_key, cfg in watchlist.items():
             if watch_key in seen or watch_key not in pname:
                 continue
             age_minutes = (now - proc.info["create_time"]) / 60
@@ -412,12 +396,12 @@ def check_idle_services(
     now = time.time()
 
     # ── Docker containers ───────────────────────────────────────────────
-    if DOCKER_IDLE_MINUTES > 0:
+    if docker_idle_minutes > 0:
         for c in containers:
             uptime = _parse_docker_uptime_minutes(c["running_for"])
-            if uptime >= DOCKER_IDLE_MINUTES:
+            if uptime >= docker_idle_minutes:
                 key = f"docker:{c['name']}"
-                if now - last_alerted.get(key, 0) >= ALERT_COOLDOWN:
+                if now - last_alerted.get(key, 0) >= alert_cooldown:
                     results.append(ServiceAlert(
                         kind="docker",
                         name=c["name"],
@@ -429,13 +413,13 @@ def check_idle_services(
 
     # ── Watchlisted processes ───────────────────────────────────────────
     for wp in watched:
-        cfg: dict[str, str | int] = WATCHLIST.get(wp.key, {})
+        cfg: dict[str, str | int] = watchlist.get(wp.key, {})
         idle_min: int = int(cfg.get("idle_minutes", 0))
         if idle_min <= 0:
             continue
         if wp.age_minutes >= idle_min:
             alert_key = f"proc:{wp.key}"
-            if now - last_alerted.get(alert_key, 0) >= ALERT_COOLDOWN:
+            if now - last_alerted.get(alert_key, 0) >= alert_cooldown:
                 results.append(ServiceAlert(
                     kind="process",
                     name=wp.key,
@@ -552,7 +536,21 @@ def main() -> None:
         "--btop-on-critical", action="store_true",
         help="Auto-open btop in a new terminal on critical alerts",
     )
+    parser.add_argument(
+        "--config", type=Path, default=None, metavar="PATH",
+        help="Path to TOML config file (default: ~/.config/sysmon/config.toml)",
+    )
+    parser.add_argument(
+        "--dump-config", action="store_true",
+        help="Print default configuration as TOML and exit",
+    )
     args = parser.parse_args()
+
+    if args.dump_config:
+        print(dump_default_config(), end="")
+        return
+
+    _apply_config(load_config(args.config))
 
     sustained = SustainedTracker()
     last_alerted: dict[str, float] = {}  # "metric:severity" -> timestamp
@@ -577,7 +575,7 @@ def main() -> None:
                 key = f"{alert.metric}:{alert.severity}"
                 now = time.time()
 
-                if now - last_alerted.get(key, 0) >= ALERT_COOLDOWN:
+                if now - last_alerted.get(key, 0) >= alert_cooldown:
                     send_alert(alert)
                     last_alerted[key] = now
                     label = METRIC_LABELS.get(alert.metric, alert.metric)

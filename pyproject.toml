@@ -1,11 +1,15 @@
 [project]
 name = "sysmon"
 version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.14"
+description = "Lightweight Linux system health monitor with desktop notifications"
+requires-python = ">=3.11"
 dependencies = [
     "psutil>=7.2.2",
 ]
+
+[project.scripts]
+sysmon = "sysmon.monitor:main"
+sysmon-inspect = "sysmon.inspect_service:main"
 
 [dependency-groups]
 dev = [

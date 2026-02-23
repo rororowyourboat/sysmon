@@ -8,7 +8,7 @@ import psutil
 import pytest
 
 from sysmon.monitor import (
-    ALERT_COOLDOWN,
+    alert_cooldown,
     Alert,
     ServiceAlert,
     SustainedTracker,
@@ -232,7 +232,7 @@ class TestCheckIdleServices:
         assert alerts == []
 
     def test_cooldown_expired_allows_alert(self) -> None:
-        last_alerted: dict[str, float] = {"docker:mydb": time.time() - ALERT_COOLDOWN - 1}
+        last_alerted: dict[str, float] = {"docker:mydb": time.time() - alert_cooldown - 1}
         containers = [
             {"name": "mydb", "image": "postgres:16", "status": "Up 2 hours", "running_for": "2 hours"},
         ]
