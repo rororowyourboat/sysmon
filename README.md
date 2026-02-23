@@ -4,6 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Strict typing: mypy + pyright](https://img.shields.io/badge/typing-strict-blue.svg)](https://mypy-lang.org/)
+[![Built with AI](https://img.shields.io/badge/built%20with-AI%20%2B%20human%20review-blueviolet.svg)](#built-with-ai)
 
 Lightweight Linux system health monitor with desktop notifications.
 
@@ -137,6 +138,10 @@ uv run pytest -q
 uv run mypy sysmon/
 uv run pyright sysmon/
 ```
+
+## Built with AI
+
+This project was built using AI coding CLI tools ([Claude Code](https://claude.ai/claude-code)) with human-driven test-driven development and code review. Every feature was specified, reviewed, and validated by a human — the AI accelerated the writing, the human ensured the quality.
 
 ## License
 
