@@ -88,44 +88,105 @@ class SustainedTracker:
             return False
 
 
-# ── Metric collection ───────────────────────────────────────────────────────
+# ── Metric collection (reads /proc directly, no sleeps) ────────────────────
+
+_NPROC: int = os.cpu_count() or 1
+_prev_cpu_times: list[int] | None = None
+_hwmon_temp_path: str | None = None
+_hwmon_searched: bool = False
+
+
+def _read_cpu_times() -> list[int]:
+    """Read aggregate CPU jiffies from /proc/stat: [user,nice,system,idle,iowait,...]."""
+    with open("/proc/stat") as f:
+        parts = f.readline().split()
+    return [int(x) for x in parts[1:]]  # skip "cpu" label
+
+
+def _calc_cpu_percent(prev: list[int], curr: list[int]) -> tuple[float, float]:
+    """Compute overall CPU% and iowait% from two /proc/stat samples."""
+    deltas = [c - p for c, p in zip(curr, prev)]
+    total = sum(deltas)
+    if total == 0:
+        return 0.0, 0.0
+    idle = deltas[3]        # idle field
+    iowait = deltas[4] if len(deltas) > 4 else 0  # iowait field
+    cpu_pct = 100.0 * (1.0 - idle / total)
+    iowait_pct = 100.0 * (iowait / total)
+    return cpu_pct, iowait_pct
+
+
+def _find_hwmon_temp() -> str | None:
+    """Find the best hwmon temp file once, cache the path."""
+    hwmon_base = "/sys/class/hwmon"
+    try:
+        entries = os.listdir(hwmon_base)
+    except OSError:
+        return None
+
+    for hwmon in sorted(entries):
+        name_path = os.path.join(hwmon_base, hwmon, "name")
+        try:
+            with open(name_path) as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if name in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
+            # Find highest numbered temp input
+            hwmon_dir = os.path.join(hwmon_base, hwmon)
+            temps = sorted(
+                p for p in os.listdir(hwmon_dir) if p.startswith("temp") and p.endswith("_input")
+            )
+            if temps:
+                return os.path.join(hwmon_dir, temps[0])
+    return None
+
+
+def _read_temp() -> float | None:
+    """Read CPU temperature from cached hwmon path."""
+    global _hwmon_temp_path, _hwmon_searched
+    if not _hwmon_searched:
+        _hwmon_temp_path = _find_hwmon_temp()
+        _hwmon_searched = True
+    if _hwmon_temp_path is None:
+        return None
+    try:
+        with open(_hwmon_temp_path) as f:
+            return int(f.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
 
 def collect_metrics() -> dict[str, float | None]:
-    """Gather all system metrics. Returns None for unavailable sensors."""
-    cpu = psutil.cpu_percent(interval=1)
-    cpu_times = psutil.cpu_times_percent(interval=0)
+    """Gather all system metrics by reading /proc and /sys directly.
+
+    CPU percentage is computed as a delta between ticks (no blocking sleep).
+    First call returns 0% CPU — that's expected.
+    """
+    global _prev_cpu_times
+
+    # CPU — delta between previous and current /proc/stat
+    curr_times = _read_cpu_times()
+    if _prev_cpu_times is not None:
+        cpu_pct, iowait_pct = _calc_cpu_percent(_prev_cpu_times, curr_times)
+    else:
+        cpu_pct, iowait_pct = 0.0, 0.0
+    _prev_cpu_times = curr_times
+
+    # Memory — still use psutil, it's fast (single /proc/meminfo read)
     ram = psutil.virtual_memory()
     swap = psutil.swap_memory()
     disk = psutil.disk_usage("/")
     load1, _, _ = os.getloadavg()
-    nproc = os.cpu_count() or 1
-
-    # CPU temperature — may not be available on all systems
-    temp = None
-    try:
-        temps = psutil.sensors_temperatures()
-        if temps:
-            # Try common sensor names
-            for name in ("coretemp", "k10temp", "acpitz", "cpu_thermal"):
-                if name in temps and temps[name]:
-                    temp = max(t.current for t in temps[name])
-                    break
-            # Fallback: take first available sensor
-            if temp is None:
-                first = next(iter(temps.values()))
-                if first:
-                    temp = max(t.current for t in first)
-    except (AttributeError, OSError):
-        pass
 
     return {
-        "cpu_percent":  cpu,
-        "iowait":       getattr(cpu_times, "iowait", 0.0),
+        "cpu_percent":  cpu_pct,
+        "iowait":       iowait_pct,
         "ram_percent":   ram.percent,
         "swap_percent":  swap.percent,
         "disk_percent":  disk.percent,
-        "cpu_temp":      temp,
-        "load_per_cpu":  load1 / nproc,
+        "cpu_temp":      _read_temp(),
+        "load_per_cpu":  load1 / _NPROC,
     }
 
 
@@ -303,8 +364,48 @@ class ServiceAlert:
     age_str: str        # "4h 12m"
 
 
+@dataclass
+class WatchedProcess:
+    """A watchlisted process found running on the system."""
+    key: str        # watchlist key
+    label: str      # human-readable
+    age_str: str    # "2h 10m"
+    age_minutes: float
+
+
+def scan_watched_processes() -> list[WatchedProcess]:
+    """Single pass over process table to find all watchlisted processes."""
+    now = time.time()
+    found: list[WatchedProcess] = []
+    seen: set[str] = set()
+
+    for proc in psutil.process_iter(["name", "create_time"]):
+        try:
+            pname = (proc.info["name"] or "").lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+        for watch_key, cfg in WATCHLIST.items():
+            if watch_key in seen or watch_key not in pname:
+                continue
+            age_minutes = (now - proc.info["create_time"]) / 60
+            hrs, mins = int(age_minutes // 60), int(age_minutes % 60)
+            age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
+            found.append(WatchedProcess(
+                key=watch_key,
+                label=cfg["label"],
+                age_str=age_str,
+                age_minutes=age_minutes,
+            ))
+            seen.add(watch_key)
+
+    return found
+
+
 def check_idle_services(
     last_alerted: dict[str, float],
+    watched: list[WatchedProcess],
+    containers: list[dict[str, str]],
 ) -> list[ServiceAlert]:
     """Check for forgotten services. Returns list of ServiceAlerts."""
     results: list[ServiceAlert] = []
@@ -312,7 +413,6 @@ def check_idle_services(
 
     # ── Docker containers ───────────────────────────────────────────────
     if DOCKER_IDLE_MINUTES > 0:
-        containers = _get_running_docker_containers()
         for c in containers:
             uptime = _parse_docker_uptime_minutes(c["running_for"])
             if uptime >= DOCKER_IDLE_MINUTES:
@@ -328,37 +428,22 @@ def check_idle_services(
                     last_alerted[key] = now
 
     # ── Watchlisted processes ───────────────────────────────────────────
-    seen: set[str] = set()
-    for proc in psutil.process_iter(["name", "create_time"]):
-        try:
-            pname = (proc.info["name"] or "").lower()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+    for wp in watched:
+        cfg = WATCHLIST.get(wp.key, {})
+        idle_min = cfg.get("idle_minutes", 0)
+        if idle_min <= 0:
             continue
-
-        for watch_key, cfg in WATCHLIST.items():
-            if cfg["idle_minutes"] <= 0:
-                continue
-            if watch_key in seen:
-                continue
-            if watch_key not in pname:
-                continue
-
-            age_minutes = (now - proc.info["create_time"]) / 60
-            if age_minutes >= cfg["idle_minutes"]:
-                alert_key = f"proc:{watch_key}"
-                if now - last_alerted.get(alert_key, 0) >= ALERT_COOLDOWN:
-                    hrs = int(age_minutes // 60)
-                    mins = int(age_minutes % 60)
-                    age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
-                    results.append(ServiceAlert(
-                        kind="process",
-                        name=watch_key,
-                        label=f"Still running: {cfg['label']}",
-                        detail=f"Open for {age_str}",
-                        age_str=age_str,
-                    ))
-                    last_alerted[alert_key] = now
-            seen.add(watch_key)
+        if wp.age_minutes >= idle_min:
+            alert_key = f"proc:{wp.key}"
+            if now - last_alerted.get(alert_key, 0) >= ALERT_COOLDOWN:
+                results.append(ServiceAlert(
+                    kind="process",
+                    name=wp.key,
+                    label=f"Still running: {wp.label}",
+                    detail=f"Open for {wp.age_str}",
+                    age_str=wp.age_str,
+                ))
+                last_alerted[alert_key] = now
 
     return results
 
@@ -408,10 +493,13 @@ def send_service_alert(alert: ServiceAlert) -> None:
 
 # ── Verbose output ──────────────────────────────────────────────────────────
 
-def print_metrics(metrics: dict[str, float | None]) -> None:
+def print_metrics(
+    metrics: dict[str, float | None],
+    containers: list[dict[str, str]],
+    watched: list[WatchedProcess],
+) -> None:
     """Print current metrics to terminal."""
     ts = time.strftime("%H:%M:%S")
-    nproc = os.cpu_count() or 1
     lines = [f"\n── sysmon [{ts}] ──"]
 
     fmt = {
@@ -431,36 +519,17 @@ def print_metrics(metrics: dict[str, float | None]) -> None:
         else:
             lines.append(f"  {label:12s}  {pattern.format(value)}")
 
-    # Also show raw load average for context
     load1, load5, load15 = os.getloadavg()
-    lines.append(f"  {'Load avg':12s}  {load1:.2f} / {load5:.2f} / {load15:.2f}  ({nproc} cores)")
+    lines.append(f"  {'Load avg':12s}  {load1:.2f} / {load5:.2f} / {load15:.2f}  ({_NPROC} cores)")
 
-    # Docker containers
-    containers = _get_running_docker_containers()
     if containers:
         lines.append(f"  {'Docker':12s}  {len(containers)} container(s)")
         for c in containers:
             lines.append(f"    - {c['name']:20s}  {c['image']:30s}  up {c['running_for']}")
 
-    # Watchlisted processes currently running
-    now = time.time()
-    running_watched = []
-    seen: set[str] = set()
-    for proc in psutil.process_iter(["name", "create_time"]):
-        try:
-            pname = (proc.info["name"] or "").lower()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        for watch_key, cfg in WATCHLIST.items():
-            if watch_key in seen or watch_key not in pname:
-                continue
-            age = (now - proc.info["create_time"]) / 60
-            hrs, mins = int(age // 60), int(age % 60)
-            age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
-            running_watched.append(f"{cfg['label']} ({age_str})")
-            seen.add(watch_key)
-    if running_watched:
-        lines.append(f"  {'Services':12s}  {', '.join(running_watched)}")
+    if watched:
+        labels = [f"{w.label} ({w.age_str})" for w in watched]
+        lines.append(f"  {'Services':12s}  {', '.join(labels)}")
 
     print("\n".join(lines))
 
@@ -494,8 +563,12 @@ def main() -> None:
         while True:
             metrics = collect_metrics()
 
+            # Single scan of processes + docker for this tick
+            watched = scan_watched_processes()
+            containers = _get_running_docker_containers()
+
             if args.verbose:
-                print_metrics(metrics)
+                print_metrics(metrics, containers, watched)
 
             alerts = check_thresholds(metrics, sustained)
 
@@ -518,8 +591,8 @@ def main() -> None:
             if has_critical and args.btop_on_critical:
                 open_btop()
 
-            # Check for forgotten services/containers
-            service_alerts = check_idle_services(last_alerted)
+            # Check for forgotten services/containers (reuses scanned data)
+            service_alerts = check_idle_services(last_alerted, watched, containers)
             for sa in service_alerts:
                 send_service_alert(sa)
                 print(f"  >> REMINDER: {sa.label} — {sa.detail}")
