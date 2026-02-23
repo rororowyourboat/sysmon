@@ -7,6 +7,24 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -34,3 +52,24 @@ jobs:
 
       - name: Type check (pyright)
         run: uv run --python ${{ matrix.python-version }} pyright sysmon/
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Build package
+        run: uv build
+
+      - name: Smoke test — install wheel and run CLI
+        run: |
+          uv venv .smoke
+          .smoke/bin/pip install dist/*.whl
+          .smoke/bin/sysmon --help
+          .smoke/bin/sysmon --dump-config > /dev/null
+          .smoke/bin/sysmon-inspect --help

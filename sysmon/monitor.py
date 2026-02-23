@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import psutil
 
 from sysmon.config import DEFAULT_CONFIG, dump_default_config, load_config
-
 
 # ── Configuration (populated by _apply_config / main) ─────────────────────
 
@@ -36,18 +35,20 @@ def _apply_config(cfg: dict[str, Any]) -> None:
     watchlist = cfg["watchlist"]
     docker_idle_minutes = cfg["docker_idle_minutes"]
 
+
 METRIC_LABELS: dict[str, str] = {
-    "cpu_percent":  "CPU Usage",
-    "iowait":       "I/O Wait",
-    "ram_percent":   "RAM Usage",
-    "swap_percent":  "Swap Usage",
-    "disk_percent":  "Disk Usage (/)",
-    "cpu_temp":      "CPU Temperature",
-    "load_per_cpu":  "Load Average",
+    "cpu_percent": "CPU Usage",
+    "iowait": "I/O Wait",
+    "ram_percent": "RAM Usage",
+    "swap_percent": "Swap Usage",
+    "disk_percent": "Disk Usage (/)",
+    "cpu_temp": "CPU Temperature",
+    "load_per_cpu": "Load Average",
 }
 
 
 # ── Data types ──────────────────────────────────────────────────────────────
+
 
 @dataclass
 class Alert:
@@ -61,6 +62,7 @@ class Alert:
 @dataclass
 class SustainedTracker:
     """Tracks when a metric first exceeded a threshold."""
+
     exceeded_since: dict[str, float] = field(default_factory=lambda: {})
 
     def check(self, key: str, is_exceeded: bool, required_seconds: int) -> bool:
@@ -119,17 +121,18 @@ def collect_metrics() -> dict[str, float | None]:
     load1, _, _ = os.getloadavg()
 
     return {
-        "cpu_percent":  cpu_pct,
-        "iowait":       iowait_pct,
-        "ram_percent":   ram.percent,
-        "swap_percent":  swap.percent,
-        "disk_percent":  disk.percent,
-        "cpu_temp":      _read_temp(),
-        "load_per_cpu":  load1 / _NPROC,
+        "cpu_percent": cpu_pct,
+        "iowait": iowait_pct,
+        "ram_percent": ram.percent,
+        "swap_percent": swap.percent,
+        "disk_percent": disk.percent,
+        "cpu_temp": _read_temp(),
+        "load_per_cpu": load1 / _NPROC,
     }
 
 
 # ── Threshold checking ──────────────────────────────────────────────────────
+
 
 def check_thresholds(
     metrics: dict[str, float | None],
@@ -139,8 +142,12 @@ def check_thresholds(
     alerts: list[Alert] = []
 
     units = {
-        "cpu_percent": "%", "iowait": "%", "ram_percent": "%",
-        "swap_percent": "%", "disk_percent": "%", "cpu_temp": "°C",
+        "cpu_percent": "%",
+        "iowait": "%",
+        "ram_percent": "%",
+        "swap_percent": "%",
+        "disk_percent": "%",
+        "cpu_temp": "°C",
         "load_per_cpu": "x",
     }
 
@@ -165,19 +172,22 @@ def check_thresholds(
             elif not exceeded:
                 continue
 
-            alerts.append(Alert(
-                metric=metric,
-                severity=severity,
-                value=value,
-                threshold=limit,
-                unit=units.get(metric, ""),
-            ))
+            alerts.append(
+                Alert(
+                    metric=metric,
+                    severity=severity,
+                    value=value,
+                    threshold=limit,
+                    unit=units.get(metric, ""),
+                )
+            )
             break  # Only report highest severity per metric
 
     return alerts
 
 
 # ── Desktop notifications ───────────────────────────────────────────────────
+
 
 def send_alert(alert: Alert) -> None:
     """Send a desktop notification via notify-send."""
@@ -186,12 +196,20 @@ def send_alert(alert: Alert) -> None:
     urgency = "normal" if alert.severity == "warning" else "critical"
 
     title = f"[{alert.severity.upper()}] {label}"
-    body = f"{alert.value:.1f}{alert.unit} (threshold: {alert.threshold:.0f}{alert.unit})"
+    body = (
+        f"{alert.value:.1f}{alert.unit} (threshold: {alert.threshold:.0f}{alert.unit})"
+    )
 
     try:
         subprocess.run(
-            ["notify-send", f"--urgency={urgency}", f"--icon={icon}",
-             "--app-name=sysmon", title, body],
+            [
+                "notify-send",
+                f"--urgency={urgency}",
+                f"--icon={icon}",
+                "--app-name=sysmon",
+                title,
+                body,
+            ],
             check=False,
             timeout=5,
         )
@@ -202,6 +220,7 @@ def send_alert(alert: Alert) -> None:
 
 
 # ── btop integration ────────────────────────────────────────────────────────
+
 
 def _detect_terminal() -> list[str]:
     """Return the command prefix to open a new terminal window."""
@@ -217,6 +236,7 @@ def _detect_terminal() -> list[str]:
 
 
 _btop_opened_at: float = 0.0  # prevent spamming btop windows
+
 
 def open_btop() -> None:
     """Launch btop in a new terminal window (rate-limited to once per 60s)."""
@@ -245,12 +265,20 @@ def open_btop() -> None:
 
 # ── Idle service / Docker detection ─────────────────────────────────────────
 
+
 def _get_running_docker_containers() -> list[dict[str, str]]:
-    """Return list of running Docker containers with name, image, status, and created-at timestamp."""
+    """Return running containers with name, image, status, and created-at."""
     try:
         result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}"],
-            capture_output=True, text=True, timeout=5,
+            [
+                "docker",
+                "ps",
+                "--format",
+                "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             return []
@@ -261,12 +289,14 @@ def _get_running_docker_containers() -> list[dict[str, str]]:
     for line in result.stdout.strip().splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
-            containers.append({
-                "name": parts[0],
-                "image": parts[1],
-                "status": parts[2],
-                "created_at": parts[3] if len(parts) > 3 else "",
-            })
+            containers.append(
+                {
+                    "name": parts[0],
+                    "image": parts[1],
+                    "status": parts[2],
+                    "created_at": parts[3] if len(parts) > 3 else "",
+                }
+            )
     return containers
 
 
@@ -284,7 +314,7 @@ def _parse_docker_created_at(created_at: str) -> int:
         # Parse "2025-01-15 10:30:00 +0000" (the "UTC" suffix is redundant)
         ts_str = created_at[:25].strip()
         created = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S %z")
-        delta = datetime.now(timezone.utc) - created
+        delta = datetime.now(UTC) - created
         return max(0, int(delta.total_seconds() / 60))
     except (ValueError, IndexError):
         return 0
@@ -305,19 +335,21 @@ def _format_minutes(minutes: int) -> str:
 @dataclass
 class ServiceAlert:
     """An idle service or Docker container that triggered a reminder."""
-    kind: str           # "docker" or "process"
-    name: str           # container name or watchlist key
-    label: str          # human-readable label
-    detail: str         # "Running for 4 days (postgres:16-alpine)"
-    age_str: str        # "4h 12m"
+
+    kind: str  # "docker" or "process"
+    name: str  # container name or watchlist key
+    label: str  # human-readable label
+    detail: str  # "Running for 4 days (postgres:16-alpine)"
+    age_str: str  # "4h 12m"
 
 
 @dataclass
 class WatchedProcess:
     """A watchlisted process found running on the system."""
-    key: str        # watchlist key
-    label: str      # human-readable
-    age_str: str    # "2h 10m"
+
+    key: str  # watchlist key
+    label: str  # human-readable
+    age_str: str  # "2h 10m"
     age_minutes: float
 
 
@@ -339,12 +371,14 @@ def scan_watched_processes() -> list[WatchedProcess]:
             age_minutes = (now - proc.info["create_time"]) / 60
             hrs, mins = int(age_minutes // 60), int(age_minutes % 60)
             age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
-            found.append(WatchedProcess(
-                key=watch_key,
-                label=str(cfg["label"]),
-                age_str=age_str,
-                age_minutes=age_minutes,
-            ))
+            found.append(
+                WatchedProcess(
+                    key=watch_key,
+                    label=str(cfg["label"]),
+                    age_str=age_str,
+                    age_minutes=age_minutes,
+                )
+            )
             seen.add(watch_key)
 
     return found
@@ -367,13 +401,15 @@ def check_idle_services(
                 key = f"docker:{c['name']}"
                 if now - last_alerted.get(key, 0) >= alert_cooldown:
                     age = _format_minutes(uptime)
-                    results.append(ServiceAlert(
-                        kind="docker",
-                        name=c["name"],
-                        label=f"Docker: {c['name']}",
-                        detail=f"Running for {age} ({c['image']})",
-                        age_str=age,
-                    ))
+                    results.append(
+                        ServiceAlert(
+                            kind="docker",
+                            name=c["name"],
+                            label=f"Docker: {c['name']}",
+                            detail=f"Running for {age} ({c['image']})",
+                            age_str=age,
+                        )
+                    )
                     last_alerted[key] = now
 
     # ── Watchlisted processes ───────────────────────────────────────────
@@ -385,13 +421,15 @@ def check_idle_services(
         if wp.age_minutes >= idle_min:
             alert_key = f"proc:{wp.key}"
             if now - last_alerted.get(alert_key, 0) >= alert_cooldown:
-                results.append(ServiceAlert(
-                    kind="process",
-                    name=wp.key,
-                    label=f"Still running: {wp.label}",
-                    detail=f"Open for {wp.age_str}",
-                    age_str=wp.age_str,
-                ))
+                results.append(
+                    ServiceAlert(
+                        kind="process",
+                        name=wp.key,
+                        label=f"Still running: {wp.label}",
+                        detail=f"Open for {wp.age_str}",
+                        age_str=wp.age_str,
+                    )
+                )
                 last_alerted[alert_key] = now
 
     return results
@@ -416,9 +454,16 @@ def send_service_alert(alert: ServiceAlert) -> None:
     body = f"{alert.detail}\nOpening inspector..."
     try:
         subprocess.run(
-            ["notify-send", "--urgency=normal", "--icon=dialog-information",
-             "--app-name=sysmon", title, body],
-            check=False, timeout=5,
+            [
+                "notify-send",
+                "--urgency=normal",
+                "--icon=dialog-information",
+                "--app-name=sysmon",
+                title,
+                body,
+            ],
+            check=False,
+            timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -426,7 +471,8 @@ def send_service_alert(alert: ServiceAlert) -> None:
     # Open inspector in a new terminal
     terminal = _detect_terminal()
     if not terminal:
-        print(f"  !! No terminal found — run manually: {' '.join(_get_inspector_cmd(alert))}")
+        cmd = " ".join(_get_inspector_cmd(alert))
+        print(f"  !! No terminal found — run manually: {cmd}")
         return
 
     try:
@@ -442,6 +488,7 @@ def send_service_alert(alert: ServiceAlert) -> None:
 
 # ── Verbose output ──────────────────────────────────────────────────────────
 
+
 def print_metrics(
     metrics: dict[str, float | None],
     containers: list[dict[str, str]],
@@ -452,13 +499,13 @@ def print_metrics(
     lines = [f"\n── sysmon [{ts}] ──"]
 
     fmt = {
-        "cpu_percent":  ("CPU",       "{:.1f}%"),
-        "iowait":       ("I/O Wait",  "{:.1f}%"),
-        "ram_percent":   ("RAM",       "{:.1f}%"),
-        "swap_percent":  ("Swap",      "{:.1f}%"),
-        "disk_percent":  ("Disk /",    "{:.1f}%"),
-        "cpu_temp":      ("CPU Temp",  "{:.1f}°C"),
-        "load_per_cpu":  ("Load/CPU",  "{:.2f}x"),
+        "cpu_percent": ("CPU", "{:.1f}%"),
+        "iowait": ("I/O Wait", "{:.1f}%"),
+        "ram_percent": ("RAM", "{:.1f}%"),
+        "swap_percent": ("Swap", "{:.1f}%"),
+        "disk_percent": ("Disk /", "{:.1f}%"),
+        "cpu_temp": ("CPU Temp", "{:.1f}°C"),
+        "load_per_cpu": ("Load/CPU", "{:.2f}x"),
     }
 
     for key, value in metrics.items():
@@ -469,7 +516,8 @@ def print_metrics(
             lines.append(f"  {label:12s}  {pattern.format(value)}")
 
     load1, load5, load15 = os.getloadavg()
-    lines.append(f"  {'Load avg':12s}  {load1:.2f} / {load5:.2f} / {load15:.2f}  ({_NPROC} cores)")
+    loads = f"{load1:.2f} / {load5:.2f} / {load15:.2f}"
+    lines.append(f"  {'Load avg':12s}  {loads}  ({_NPROC} cores)")
 
     if containers:
         lines.append(f"  {'Docker':12s}  {len(containers)} container(s)")
@@ -486,28 +534,37 @@ def print_metrics(
 
 # ── Main loop ───────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Monitor system health and send desktop alerts.",
     )
     parser.add_argument(
-        "--interval", type=int, default=10,
+        "--interval",
+        type=int,
+        default=10,
         help="Seconds between checks (default: 10)",
     )
     parser.add_argument(
-        "--verbose", action="store_true",
+        "--verbose",
+        action="store_true",
         help="Print metrics to terminal each tick",
     )
     parser.add_argument(
-        "--btop-on-critical", action="store_true",
+        "--btop-on-critical",
+        action="store_true",
         help="Auto-open btop in a new terminal on critical alerts",
     )
     parser.add_argument(
-        "--config", type=Path, default=None, metavar="PATH",
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
         help="Path to TOML config file (default: ~/.config/sysmon/config.toml)",
     )
     parser.add_argument(
-        "--dump-config", action="store_true",
+        "--dump-config",
+        action="store_true",
         help="Print default configuration as TOML and exit",
     )
     args = parser.parse_args()

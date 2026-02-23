@@ -6,7 +6,6 @@ import psutil
 
 from sysmon.inspect_service import _find_processes, _fmt_bytes
 
-
 # ── _fmt_bytes ────────────────────────────────────────────────────────────
 
 

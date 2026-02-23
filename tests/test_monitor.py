@@ -1,17 +1,13 @@
 """Tests for sysmon.monitor."""
 
-import subprocess
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import psutil
 import pytest
 
 from sysmon.monitor import (
-    alert_cooldown,
     Alert,
-    ServiceAlert,
     SustainedTracker,
     WatchedProcess,
     _detect_terminal,
@@ -19,13 +15,13 @@ from sysmon.monitor import (
     _get_running_docker_containers,
     _parse_docker_created_at,
     _read_temp,
+    alert_cooldown,
     check_idle_services,
     check_thresholds,
     collect_metrics,
     scan_watched_processes,
     send_alert,
 )
-
 
 # ── SustainedTracker ───────────────────────────────────────────────────────
 
@@ -119,13 +115,13 @@ class TestCheckThresholds:
 
 class TestParseDockerCreatedAt:
     def test_recent_timestamp(self) -> None:
-        two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+        two_hours_ago = datetime.now(UTC) - timedelta(hours=2)
         ts = two_hours_ago.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC"
         result = _parse_docker_created_at(ts)
         assert 119 <= result <= 121  # ~120 minutes, allow 1 min tolerance
 
     def test_old_timestamp(self) -> None:
-        three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+        three_days_ago = datetime.now(UTC) - timedelta(days=3)
         ts = three_days_ago.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC"
         result = _parse_docker_created_at(ts)
         expected = 3 * 24 * 60
@@ -138,7 +134,7 @@ class TestParseDockerCreatedAt:
         assert _parse_docker_created_at("not a timestamp") == 0
 
     def test_five_minutes_ago(self) -> None:
-        five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+        five_min_ago = datetime.now(UTC) - timedelta(minutes=5)
         ts = five_min_ago.strftime("%Y-%m-%d %H:%M:%S %z") + " UTC"
         result = _parse_docker_created_at(ts)
         assert 4 <= result <= 6
@@ -203,9 +199,11 @@ class TestReadTemp:
 
 
 class TestCheckIdleServices:
-    def _make_container(self, name: str, image: str, minutes_ago: int) -> dict[str, str]:
+    def _make_container(
+        self, name: str, image: str, minutes_ago: int
+    ) -> dict[str, str]:
         """Helper to create a container dict with a created_at timestamp."""
-        ts = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        ts = datetime.now(UTC) - timedelta(minutes=minutes_ago)
         return {
             "name": name,
             "image": image,
@@ -238,7 +236,9 @@ class TestCheckIdleServices:
     def test_process_never_nag(self) -> None:
         # idle_minutes=0 means never nag
         last_alerted: dict[str, float] = {}
-        wp = WatchedProcess(key="code", label="VS Code", age_str="5h 0m", age_minutes=300.0)
+        wp = WatchedProcess(
+            key="code", label="VS Code", age_str="5h 0m", age_minutes=300.0
+        )
         alerts = check_idle_services(last_alerted, [wp], [])
         assert alerts == []
 
@@ -249,7 +249,9 @@ class TestCheckIdleServices:
         assert alerts == []
 
     def test_cooldown_expired_allows_alert(self) -> None:
-        last_alerted: dict[str, float] = {"docker:mydb": time.time() - alert_cooldown - 1}
+        last_alerted: dict[str, float] = {
+            "docker:mydb": time.time() - alert_cooldown - 1
+        }
         containers = [self._make_container("mydb", "postgres:16", 120)]
         alerts = check_idle_services(last_alerted, [], containers)
         assert len(alerts) == 1
@@ -283,8 +285,13 @@ class TestCollectMetrics:
         result = collect_metrics()
 
         expected_keys = {
-            "cpu_percent", "iowait", "ram_percent",
-            "swap_percent", "disk_percent", "cpu_temp", "load_per_cpu",
+            "cpu_percent",
+            "iowait",
+            "ram_percent",
+            "swap_percent",
+            "disk_percent",
+            "cpu_temp",
+            "load_per_cpu",
         }
         assert set(result.keys()) == expected_keys
         assert result["cpu_percent"] == pytest.approx(50.0)
@@ -343,7 +350,7 @@ class TestGetRunningDockerContainers:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="mydb\tpostgres:16\tUp 2 hours\t2025-01-15 10:30:00 +0000 UTC\n"
-                   "redis\tredis:7\tUp 30 minutes\t2025-01-15 12:00:00 +0000 UTC\n",
+            "redis\tredis:7\tUp 30 minutes\t2025-01-15 12:00:00 +0000 UTC\n",
         )
         result = _get_running_docker_containers()
         assert len(result) == 2
@@ -399,8 +406,16 @@ class TestSendAlert:
         assert "[CRITICAL]" in args[-2]
 
     @patch("sysmon.monitor.subprocess.run", side_effect=FileNotFoundError)
-    def test_missing_notify_send(self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        alert = Alert(metric="ram_percent", severity="warning", value=90.0, threshold=85.0, unit="%")
+    def test_missing_notify_send(
+        self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        alert = Alert(
+            metric="ram_percent",
+            severity="warning",
+            value=90.0,
+            threshold=85.0,
+            unit="%",
+        )
         send_alert(alert)
         captured = capsys.readouterr()
         assert "notify-send not found" in captured.out
@@ -412,13 +427,16 @@ class TestSendAlert:
 class TestDetectTerminal:
     @patch("sysmon.monitor.shutil.which")
     def test_ghostty_found(self, mock_which: MagicMock) -> None:
-        mock_which.side_effect = lambda cmd: "/usr/bin/ghostty" if cmd == "ghostty" else None
+        mock_which.side_effect = lambda cmd: (
+            "/usr/bin/ghostty" if cmd == "ghostty" else None
+        )
         assert _detect_terminal() == ["ghostty", "-e"]
 
     @patch("sysmon.monitor.shutil.which")
     def test_gnome_terminal_fallback(self, mock_which: MagicMock) -> None:
         def which(cmd: str) -> str | None:
             return "/usr/bin/gnome-terminal" if cmd == "gnome-terminal" else None
+
         mock_which.side_effect = which
         assert _detect_terminal() == ["gnome-terminal", "--"]
 

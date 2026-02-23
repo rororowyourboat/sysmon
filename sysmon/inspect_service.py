@@ -44,6 +44,7 @@ def _fmt_bytes(n: int) -> str:
 
 # ── Process inspection ──────────────────────────────────────────────────────
 
+
 def _find_processes(name: str) -> list[psutil.Process]:
     """Find all processes matching a name (case-insensitive substring)."""
     name_lower = name.lower()
@@ -60,9 +61,12 @@ def _find_processes(name: str) -> list[psutil.Process]:
 
 def _show_process_table(procs: list[psutil.Process]) -> None:
     """Print a resource table for a set of processes."""
-    header = f"  {'PID':>7s}  {'CPU%':>6s}  {'MEM':>10s}  {'MEM%':>5s}  {'UPTIME':>10s}  {'COMMAND'}"
+    header = (
+        f"  {'PID':>7s}  {'CPU%':>6s}  {'MEM':>10s}"
+        f"  {'MEM%':>5s}  {'UPTIME':>10s}  {'COMMAND'}"
+    )
     print(header)
-    print(f"  {'─'*7}  {'─'*6}  {'─'*10}  {'─'*5}  {'─'*10}  {'─'*30}")
+    print(f"  {'─' * 7}  {'─' * 6}  {'─' * 10}  {'─' * 5}  {'─' * 10}  {'─' * 30}")
 
     total_mem = 0
     total_cpu = 0.0
@@ -90,10 +94,18 @@ def _show_process_table(procs: list[psutil.Process]) -> None:
         total_mem += mem_info.rss
         total_cpu += cpu
 
-        print(f"  {pid:>7d}  {cpu:>5.1f}%  {_fmt_bytes(mem_info.rss):>10s}  {mem_pct:>4.1f}%  {age_str:>10s}  {cmd_str}")
+        mem_str = _fmt_bytes(mem_info.rss)
+        print(
+            f"  {pid:>7d}  {cpu:>5.1f}%  {mem_str:>10s}"
+            f"  {mem_pct:>4.1f}%  {age_str:>10s}  {cmd_str}"
+        )
 
     print()
-    print(f"  {BOLD}Total: {len(procs)} process(es), CPU {total_cpu:.1f}%, MEM {_fmt_bytes(total_mem)}{RESET}")
+    mem_total = _fmt_bytes(total_mem)
+    print(
+        f"  {BOLD}Total: {len(procs)} process(es),"
+        f" CPU {total_cpu:.1f}%, MEM {mem_total}{RESET}"
+    )
 
 
 def inspect_process(name: str) -> None:
@@ -126,7 +138,7 @@ def inspect_process(name: str) -> None:
     print(f"    {DIM}[d]{RESET} Dismiss — do nothing")
     print(f"{_hr()}")
 
-    choice = input(f"\n  Choice [g/k/d]: ").strip().lower()
+    choice = input("\n  Choice [g/k/d]: ").strip().lower()
 
     if choice == "g":
         print(f"\n  Sending SIGTERM to {len(procs)} process(es)...")
@@ -139,7 +151,7 @@ def inspect_process(name: str) -> None:
         _gone, alive = psutil.wait_procs(procs, timeout=5)
         if alive:
             print(f"  {YELLOW}{len(alive)} process(es) still running after 5s{RESET}")
-            force = input(f"  Force kill remaining? [y/N]: ").strip().lower()
+            force = input("  Force kill remaining? [y/N]: ").strip().lower()
             if force == "y":
                 for proc in alive:
                     try:
@@ -160,26 +172,42 @@ def inspect_process(name: str) -> None:
         print(f"  {GREEN}Done.{RESET}")
 
     else:
-        print(f"\n  Dismissed.")
+        print("\n  Dismissed.")
 
     _wait_dismiss()
 
 
 # ── Docker inspection ───────────────────────────────────────────────────────
 
+
 def inspect_docker(container_name: str) -> None:
     """Inspect and optionally stop a Docker container."""
     # Get container stats
     try:
         stats = subprocess.run(
-            ["docker", "stats", container_name, "--no-stream",
-             "--format", "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}"],
-            capture_output=True, text=True, timeout=10,
+            [
+                "docker",
+                "stats",
+                container_name,
+                "--no-stream",
+                "--format",
+                "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         info = subprocess.run(
-            ["docker", "inspect", container_name,
-             "--format", "{{.Config.Image}}\t{{.State.StartedAt}}\t{{.State.Status}}"],
-            capture_output=True, text=True, timeout=5,
+            [
+                "docker",
+                "inspect",
+                container_name,
+                "--format",
+                "{{.Config.Image}}\t{{.State.StartedAt}}\t{{.State.Status}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         print(f"  {RED}Docker not available{RESET}")
@@ -187,7 +215,9 @@ def inspect_docker(container_name: str) -> None:
         return
 
     if stats.returncode != 0 or info.returncode != 0:
-        print(f"\n  {YELLOW}Container '{container_name}' not found or not running{RESET}")
+        print(
+            f"\n  {YELLOW}Container '{container_name}' not found or not running{RESET}"
+        )
         _wait_dismiss()
         return
 
@@ -211,7 +241,7 @@ def inspect_docker(container_name: str) -> None:
     stat_parts = stats.stdout.strip().split("\t")
     if len(stat_parts) >= 6:
         labels = ["CPU %", "Memory", "MEM %", "Net I/O", "Block I/O", "PIDs"]
-        for label, val in zip(labels, stat_parts):
+        for label, val in zip(labels, stat_parts, strict=False):
             print(f"  {label:12s}  {val}")
     else:
         print(f"  {DIM}(stats unavailable){RESET}")
@@ -220,7 +250,9 @@ def inspect_docker(container_name: str) -> None:
     print()
     top = subprocess.run(
         ["docker", "top", container_name, "-o", "pid,pcpu,pmem,comm"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     if top.returncode == 0 and top.stdout.strip():
         print(f"  {BOLD}Container processes:{RESET}")
@@ -234,13 +266,15 @@ def inspect_docker(container_name: str) -> None:
     print(f"    {DIM}[d]{RESET} Dismiss — do nothing")
     print(f"{_hr()}")
 
-    choice = input(f"\n  Choice [s/k/d]: ").strip().lower()
+    choice = input("\n  Choice [s/k/d]: ").strip().lower()
 
     if choice == "s":
         print(f"\n  Stopping {container_name}...")
         result = subprocess.run(
             ["docker", "stop", container_name],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode == 0:
             print(f"  {GREEN}Stopped.{RESET}")
@@ -251,7 +285,9 @@ def inspect_docker(container_name: str) -> None:
         print(f"\n  {RED}Killing {container_name}...{RESET}")
         result = subprocess.run(
             ["docker", "kill", container_name],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0:
             print(f"  {GREEN}Killed.{RESET}")
@@ -259,12 +295,13 @@ def inspect_docker(container_name: str) -> None:
             print(f"  {RED}Failed: {result.stderr.strip()}{RESET}")
 
     else:
-        print(f"\n  Dismissed.")
+        print("\n  Dismissed.")
 
     _wait_dismiss()
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def _wait_dismiss() -> None:
     """Wait for user to press Enter before closing the terminal."""
