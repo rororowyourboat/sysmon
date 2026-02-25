@@ -33,6 +33,7 @@ Issues = "https://github.com/rororowyourboat/sysmon/issues"
 [project.scripts]
 sysmon = "sysmon.monitor:main"
 sysmon-inspect = "sysmon.inspect_service:main"
+sysmon-dashboard = "sysmon.dashboard:main"
 
 [dependency-groups]
 dev = [
