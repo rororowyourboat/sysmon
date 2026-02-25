@@ -351,35 +351,56 @@ class WatchedProcess:
     label: str  # human-readable
     age_str: str  # "2h 10m"
     age_minutes: float
+    cpu_percent: float = 0.0  # aggregate CPU% across all matching PIDs
 
 
 def scan_watched_processes() -> list[WatchedProcess]:
-    """Single pass over process table to find all watchlisted processes."""
-    now = time.time()
-    found: list[WatchedProcess] = []
-    seen: set[str] = set()
+    """Single pass over process table to find all watchlisted processes.
 
-    for proc in psutil.process_iter(["name", "create_time"]):
+    Collects aggregate CPU% for each watchlist entry (summed across all
+    matching PIDs) so that check_idle_services can distinguish active
+    processes (e.g. Zoom in a call) from truly idle ones.
+    """
+    now = time.time()
+    # Accumulate per watch_key: oldest create_time and total CPU%
+    accum: dict[str, dict[str, Any]] = {}
+
+    for proc in psutil.process_iter(["name", "create_time", "cpu_percent"]):
         try:
             pname = (proc.info["name"] or "").lower()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
         for watch_key, cfg in watchlist.items():
-            if watch_key in seen or watch_key not in pname:
+            if watch_key not in pname:
                 continue
-            age_minutes = (now - proc.info["create_time"]) / 60
-            hrs, mins = int(age_minutes // 60), int(age_minutes % 60)
-            age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
-            found.append(
-                WatchedProcess(
-                    key=watch_key,
-                    label=str(cfg["label"]),
-                    age_str=age_str,
-                    age_minutes=age_minutes,
-                )
+            if watch_key not in accum:
+                accum[watch_key] = {
+                    "cfg": cfg,
+                    "create_time": proc.info["create_time"],
+                    "cpu_total": 0.0,
+                }
+            # Track the oldest matching process for age calculation
+            accum[watch_key]["create_time"] = min(
+                accum[watch_key]["create_time"], proc.info["create_time"]
             )
-            seen.add(watch_key)
+            accum[watch_key]["cpu_total"] += proc.info.get("cpu_percent", 0.0) or 0.0
+            break  # this proc matched; move to next proc
+
+    found: list[WatchedProcess] = []
+    for watch_key, data in accum.items():
+        age_minutes = (now - data["create_time"]) / 60
+        hrs, mins = int(age_minutes // 60), int(age_minutes % 60)
+        age_str = f"{hrs}h {mins}m" if hrs else f"{mins}m"
+        found.append(
+            WatchedProcess(
+                key=watch_key,
+                label=str(data["cfg"]["label"]),
+                age_str=age_str,
+                age_minutes=age_minutes,
+                cpu_percent=data["cpu_total"],
+            )
+        )
 
     return found
 
@@ -419,6 +440,11 @@ def check_idle_services(
         if idle_min <= 0:
             continue
         if wp.age_minutes >= idle_min:
+            # Skip if process is actively using CPU (e.g. Zoom in a call)
+            active_cpu: float = float(cfg.get("active_cpu", 0))
+            if active_cpu > 0 and wp.cpu_percent >= active_cpu:
+                continue
+
             alert_key = f"proc:{wp.key}"
             if now - last_alerted.get(alert_key, 0) >= alert_cooldown:
                 results.append(
@@ -526,8 +552,14 @@ def print_metrics(
             lines.append(f"    - {c['name']:20s}  {c['image']:30s}  up {age}")
 
     if watched:
-        labels = [f"{w.label} ({w.age_str})" for w in watched]
-        lines.append(f"  {'Services':12s}  {', '.join(labels)}")
+        parts = []
+        for w in watched:
+            active_cpu = float(watchlist.get(w.key, {}).get("active_cpu", 0))
+            if active_cpu > 0 and w.cpu_percent >= active_cpu:
+                parts.append(f"{w.label} ({w.age_str}, active ~{w.cpu_percent:.0f}%)")
+            else:
+                parts.append(f"{w.label} ({w.age_str})")
+        lines.append(f"  {'Services':12s}  {', '.join(parts)}")
 
     print("\n".join(lines))
 
