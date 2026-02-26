@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,32 @@ alert_cooldown: int = DEFAULT_CONFIG["alert_cooldown"]
 watchlist: dict[str, dict[str, str | int]] = DEFAULT_CONFIG["watchlist"]
 docker_idle_minutes: int = DEFAULT_CONFIG["docker_idle_minutes"]
 docker_whitelist: list[str] = DEFAULT_CONFIG["docker_whitelist"]
+
+# ── Alert logging ──────────────────────────────────────────────────────────
+
+LOG_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "sysmon"
+LOG_FILE = LOG_DIR / "alerts.log"
+
+alert_logger: logging.Logger | None = None
+
+
+def _setup_alert_logger() -> logging.Logger:
+    """Create a rotating file logger for alerts (~24h of history)."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("sysmon.alerts")
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=512_000, backupCount=1)
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    return logger
+
+
+def _log_alert(message: str) -> None:
+    """Write an alert entry to the log file."""
+    global alert_logger
+    if alert_logger is None:
+        alert_logger = _setup_alert_logger()
+    alert_logger.info(message)
 
 
 def _apply_config(cfg: dict[str, Any]) -> None:
@@ -201,6 +229,8 @@ def send_alert(alert: Alert) -> None:
     body = (
         f"{alert.value:.1f}{alert.unit} (threshold: {alert.threshold:.0f}{alert.unit})"
     )
+
+    _log_alert(f"{title}  {body}")
 
     try:
         subprocess.run(
@@ -482,6 +512,7 @@ def send_service_alert(alert: ServiceAlert) -> None:
     # Desktop notification
     title = alert.label
     body = f"{alert.detail}\nOpening inspector..."
+    _log_alert(f"SERVICE  {title}  {alert.detail}")
     try:
         subprocess.run(
             [
