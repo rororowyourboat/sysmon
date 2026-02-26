@@ -14,6 +14,7 @@ from typing import Any
 DEFAULT_CONFIG: dict[str, Any] = {
     "alert_cooldown": 300,
     "docker_idle_minutes": 60,
+    "docker_whitelist": [],
     "thresholds": {
         "cpu_percent": {"warning": 80.0, "critical": 95.0},
         "iowait": {"warning": 15.0, "critical": 30.0},
@@ -102,6 +103,7 @@ def dump_default_config() -> str:
         "",
         f"alert_cooldown = {DEFAULT_CONFIG['alert_cooldown']}",
         f"docker_idle_minutes = {DEFAULT_CONFIG['docker_idle_minutes']}",
+        f"docker_whitelist = {DEFAULT_CONFIG['docker_whitelist']}  # container names to never nag about",
         "",
     ]
 

@@ -24,16 +24,18 @@ sustained: dict[str, dict[str, int]] = DEFAULT_CONFIG["sustained"]
 alert_cooldown: int = DEFAULT_CONFIG["alert_cooldown"]
 watchlist: dict[str, dict[str, str | int]] = DEFAULT_CONFIG["watchlist"]
 docker_idle_minutes: int = DEFAULT_CONFIG["docker_idle_minutes"]
+docker_whitelist: list[str] = DEFAULT_CONFIG["docker_whitelist"]
 
 
 def _apply_config(cfg: dict[str, Any]) -> None:
     """Update module globals from a merged config dict."""
-    global thresholds, sustained, alert_cooldown, watchlist, docker_idle_minutes
+    global thresholds, sustained, alert_cooldown, watchlist, docker_idle_minutes, docker_whitelist
     thresholds = cfg["thresholds"]
     sustained = cfg["sustained"]
     alert_cooldown = cfg["alert_cooldown"]
     watchlist = cfg["watchlist"]
     docker_idle_minutes = cfg["docker_idle_minutes"]
+    docker_whitelist = cfg.get("docker_whitelist", [])
 
 
 METRIC_LABELS: dict[str, str] = {
@@ -417,6 +419,8 @@ def check_idle_services(
     # ── Docker containers ───────────────────────────────────────────────
     if docker_idle_minutes > 0:
         for c in containers:
+            if c["name"] in docker_whitelist:
+                continue
             uptime = _parse_docker_created_at(c["created_at"])
             if uptime >= docker_idle_minutes:
                 key = f"docker:{c['name']}"
