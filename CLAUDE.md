@@ -21,8 +21,14 @@ uv run sysmon-inspect --docker financial_db
 
 # Tests and type checking
 uv run pytest -q
+uv run pytest tests/test_monitor.py -q          # single file
+uv run pytest tests/test_monitor.py::test_name -q  # single test
 uv run mypy sysmon/
 uv run pyright sysmon/
+
+# Linting
+uv run ruff check sysmon/ tests/
+uv run ruff check --fix sysmon/ tests/  # auto-fix
 
 # Add dependencies
 uv add <package>
@@ -41,12 +47,12 @@ uv add <package>
 
 ### monitor.py — Main Loop
 
-Module-level config variables (`thresholds`, `sustained`, `alert_cooldown`, `watchlist`, `docker_idle_minutes`) are initialized from `DEFAULT_CONFIG` and overwritten by `_apply_config()` at startup.
+Module-level config variables (`thresholds`, `sustained`, `alert_cooldown`, `watchlist`, `docker_idle_minutes`, `docker_whitelist`) are initialized from `DEFAULT_CONFIG` and overwritten by `_apply_config()` at startup.
 
 `main()` runs a loop every N seconds:
 1. `collect_metrics()` — gathers 7 system metrics via psutil + os
 2. `check_thresholds()` — compares against `thresholds` dict, returns `list[Alert]`. Uses `SustainedTracker` for metrics that must stay elevated before alerting (e.g. CPU >80% for 30s)
-3. `send_alert()` — desktop notification; optionally opens btop on critical
+3. `send_alert()` — desktop notification + writes to rotating alert log (`~/.local/state/sysmon/alerts.log`); optionally opens btop on critical
 4. `check_idle_services()` — scans Docker containers (`docker ps`) and watchlisted processes (`psutil.process_iter`), returns `list[ServiceAlert]`
 5. `send_service_alert()` — notification + spawns `inspect_service.py` in a new terminal
 
@@ -67,3 +73,5 @@ Launched by the monitor as a subprocess in a new terminal (`start_new_session=Tr
 - **Sustained checks** prevent flaky single-sample spikes from triggering false alarms
 - **Graceful degradation** — missing sensors, Docker not running, or no terminal emulator won't crash the monitor
 - **Watchlist `idle_minutes: 0`** means "track in verbose output but never nag" (used for Chrome, VS Code, Firefox)
+- **`docker_whitelist`** — container names (e.g. `["ollama"]`) that skip idle checks entirely, for persistent services that should always run
+- **Alert log** — `~/.local/state/sysmon/alerts.log`, rotating at ~500KB with 1 backup; provides short-term history for debugging recurring alerts
