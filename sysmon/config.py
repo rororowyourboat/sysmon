@@ -17,7 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "docker_whitelist": [],
     "thresholds": {
         "cpu_percent": {"warning": 80.0, "critical": 95.0},
-        "iowait": {"warning": 15.0, "critical": 30.0},
+        "iowait": {"warning": 25.0, "critical": 50.0},
         "ram_percent": {"warning": 85.0, "critical": 95.0},
         "swap_percent": {"warning": 50.0, "critical": 80.0},
         "disk_percent": {"warning": 85.0, "critical": 95.0},
@@ -26,6 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "sustained": {
         "cpu_percent": {"warning": 30, "critical": 15},
+        "iowait": {"warning": 30, "critical": 15},
         "cpu_temp": {"warning": 60, "critical": 30},
     },
     "watchlist": {
